@@ -290,13 +290,12 @@ class GemmaLISATrainer(Trainer):
         return os.path.join(output_dir, checkpoint_dirs[-1])
     
     def training_step(self, model, inputs, num_items_in_batch=None):
-        """
-        学習ステップを実行する
+        """カスタムトレーニングステップ
         
         Args:
-            model: 学習するモデル
+            model: モデル
             inputs: 入力データ
-            num_items_in_batch: バッチ内のアイテム数（Transformers 4.x API互換用）
+            num_items_in_batch: バッチ内のアイテム数
             
         Returns:
             損失値
@@ -321,7 +320,43 @@ class GemmaLISATrainer(Trainer):
         
         # 順伝播
         outputs = model(**inputs)
-        loss = outputs["loss"]
+        
+        # 修正: 損失へのアクセス方法を変更
+        # Gemma3モデルはCausalLMOutputWithPastオブジェクトを返し、.lossで属性としてアクセスする必要がある
+        # 両方の形式（属性と辞書）に対応
+        try:
+            # 1. 属性としてアクセスを試みる（Gemma3などのモデルで期待される方法）
+            if hasattr(outputs, "loss"):
+                loss = outputs.loss
+            # 2. 辞書としてアクセスを試みる（元の実装方法）
+            elif isinstance(outputs, dict) and "loss" in outputs:
+                loss = outputs["loss"]
+            else:
+                # どちらの方法でもlossが見つからない場合、例外をあげる前にデバッグ情報を出力
+                logger.error(f"損失が見つかりません。outputs型: {type(outputs)}")
+                if isinstance(outputs, dict):
+                    logger.error(f"出力キー: {list(outputs.keys())}")
+                else:
+                    logger.error(f"利用可能な属性: {dir(outputs)}")
+                raise ValueError("モデル出力から損失を取得できません。モデルの出力形式を確認してください。")
+                
+            # ここでmapオブジェクトをテンソルに変換する処理を追加
+            # Pythonのmapオブジェクトの場合、リストに変換してからテンソルに変換
+            if isinstance(loss, map):
+                logger.info("損失がmapオブジェクトとして返されました。テンソルに変換します。")
+                loss_list = list(loss)
+                # 損失のリストが1つの値しか持たない場合を想定
+                if len(loss_list) == 1:
+                    loss = torch.tensor(loss_list[0], device=model.device)
+                else:
+                    # 複数の値がある場合は平均を取る
+                    loss = torch.tensor(loss_list, device=model.device).mean()
+                logger.info(f"損失をテンソルに変換しました: {loss}")
+                
+        except Exception as e:
+            logger.error(f"損失へのアクセス中にエラーが発生しました: {e}")
+            logger.error(f"outputs型: {type(outputs)}")
+            raise e
         
         # 損失のスケーリング（混合精度学習時）
         if (self.args.fp16 or self.args.bf16) and self.scaler is not None:
@@ -338,6 +373,16 @@ class GemmaLISATrainer(Trainer):
             self.scaler.update()
         else:
             # 通常の学習
+            # mapオブジェクトやその他の非テンソル型をチェック
+            if not isinstance(loss, torch.Tensor):
+                logger.warning(f"損失が期待されるテンソル型ではありません: {type(loss)}。テンソルに変換します。")
+                if hasattr(loss, "__iter__"):
+                    # iterableの場合、listに変換してからテンソルに変換
+                    loss = torch.tensor(list(loss), device=model.device).mean()
+                else:
+                    # 単一の値の場合
+                    loss = torch.tensor(loss, device=model.device)
+            
             loss.backward()
             
             # 勾配クリッピング（CUDAが利用可能な場合のみ）
@@ -352,10 +397,17 @@ class GemmaLISATrainer(Trainer):
         # ログに損失を記録
         logs = {"loss": loss.detach().cpu().item()}
         
-        # 個別の損失をログに記録
-        if "lm_loss" in outputs and outputs["lm_loss"] is not None:
+        # 個別の損失をログに記録 - 辞書と属性の両方をチェック
+        # lm_loss
+        if hasattr(outputs, "lm_loss") and outputs.lm_loss is not None:
+            logs["lm_loss"] = outputs.lm_loss.detach().cpu().item()
+        elif isinstance(outputs, dict) and "lm_loss" in outputs and outputs["lm_loss"] is not None:
             logs["lm_loss"] = outputs["lm_loss"].detach().cpu().item()
-        if "mask_loss" in outputs and outputs["mask_loss"] is not None:
+            
+        # mask_loss
+        if hasattr(outputs, "mask_loss") and outputs.mask_loss is not None:
+            logs["mask_loss"] = outputs.mask_loss.detach().cpu().item()
+        elif isinstance(outputs, dict) and "mask_loss" in outputs and outputs["mask_loss"] is not None:
             logs["mask_loss"] = outputs["mask_loss"].detach().cpu().item()
         
         # ログをTrainerクラスのログ機構に追加
