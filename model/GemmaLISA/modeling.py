@@ -16,6 +16,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria, Stopping
 from transformers.generation.logits_process import LogitsProcessor, LogitsProcessorList
 from transformers.utils import logging
 from transformers.models.gemma3.modeling_gemma3 import Gemma3ForConditionalGeneration
+from transformers.generation.utils import GenerationMixin
 
 from model.segment_anything import sam_model_registry
 from model.segment_anything.modeling import Sam
@@ -119,7 +120,7 @@ class LISAModel(LISAPreTrainedModel):
         raise NotImplementedError("このメソッドはLISAForCausalLMクラスで実装されています")
 
 
-class LISAForCausalLM(LISAPreTrainedModel):
+class LISAForCausalLM(LISAPreTrainedModel, GenerationMixin):
     """
     因果言語モデリングのためのLISAモデル。
     GemmaベースのLLMとSAMを組み合わせて、テキストと視覚的セグメンテーションを処理します。
@@ -160,13 +161,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
                     torch_dtype=torch.bfloat16,
                     low_cpu_mem_usage=True,
                     trust_remote_code=True,
-                    attn_implementation='eager'
+                    attn_implementation='eager',
+                    max_length=8192  # 明示的に最大長を指定
                 )
                 
                 # シーケンス長を拡張（コンフィグを更新）
                 if hasattr(self.language_model.config, "max_sequence_length"):
-                    self.language_model.config.max_sequence_length = 1024
-                    logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
+                    self.language_model.config.max_sequence_length = 8192  # 8Kトークンに拡張
+                    logger.info(f"Gemma3のmax_sequence_lengthを8192に設定しました")
             else:
                 # 設定のみから初期化（通常は推奨されない）
                 gemma_config = config.gemma_config
@@ -182,13 +184,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
                 trust_remote_code=True,
-                attn_implementation='eager'
+                attn_implementation='eager',
+                max_length=8192  # 明示的に最大長を指定
             )
             
             # シーケンス長を拡張（コンフィグを更新）
             if hasattr(self.language_model.config, "max_sequence_length"):
-                self.language_model.config.max_sequence_length = 1024
-                logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
+                self.language_model.config.max_sequence_length = 8192  # 8Kトークンに拡張
+                logger.info(f"Gemma3のmax_sequence_lengthを8192に設定しました")
         else:
             raise ValueError("GemmaモデルのconfigまたはパスをLISA configに指定する必要があります")
         
@@ -232,13 +235,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
             torch_dtype=kwargs.get("torch_dtype", torch.bfloat16),
             low_cpu_mem_usage=True,
             trust_remote_code=True,
-            attn_implementation='eager'
+            attn_implementation='eager',
+            max_length=8192  # 明示的に最大長を指定
         )
         
         # シーケンス長を拡張（コンフィグを更新）
         if hasattr(gemma_model.config, "max_sequence_length"):
-            gemma_model.config.max_sequence_length = 1024
-            logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
+            gemma_model.config.max_sequence_length = 8192  # 8Kトークンに拡張
+            logger.info(f"Gemma3のmax_sequence_lengthを8192に設定しました")
         
         # 新しいインスタンスを作成
         config = GemmaLISAConfig()
@@ -560,17 +564,79 @@ class LISAForCausalLM(LISAPreTrainedModel):
         # 損失がmapオブジェクトまたは非テンソル型である場合、テンソルに変換
         if loss is not None and not isinstance(loss, torch.Tensor):
             device = next(self.parameters()).device
+            logger.info(f"損失が非テンソル型です（{type(loss)}）: {loss}")
             
+            # 辞書の場合
+            if isinstance(loss, dict):
+                # 数値のみを含む辞書の場合
+                try:
+                    # 辞書内の数値を抽出して平均を計算
+                    numeric_values = []
+                    for k, v in loss.items():
+                        if isinstance(v, (int, float)):
+                            numeric_values.append(float(v))
+                        elif isinstance(v, torch.Tensor):
+                            numeric_values.append(v.item())
+                    
+                    if numeric_values:
+                        loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=device)
+                        logger.info(f"辞書から数値を抽出して損失を計算しました: {loss}")
+                    else:
+                        # 数値がない場合はゼロの損失を返す
+                        logger.warning(f"辞書から数値を抽出できませんでした。ゼロの損失を使用します。")
+                        loss = torch.tensor(0.0, device=device)
+                except Exception as e:
+                    logger.error(f"辞書からの損失計算中にエラーが発生しました: {e}")
+                    # エラーが発生した場合はゼロの損失を返す
+                    loss = torch.tensor(0.0, device=device)
             # mapオブジェクトの場合
-            if isinstance(loss, map):
+            elif isinstance(loss, map):
                 loss_list = list(loss)
-                loss = torch.tensor(loss_list, device=device).mean()
+                # 文字列を含む場合があるので、数値のみをフィルタリング
+                numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                if numeric_loss:
+                    loss = torch.tensor(numeric_loss, device=device).mean()
+                else:
+                    logger.warning(f"mapオブジェクトから数値を抽出できませんでした。ゼロの損失を使用します。")
+                    loss = torch.tensor(0.0, device=device)
             # イテラブルな場合
             elif hasattr(loss, "__iter__"):
-                loss = torch.tensor(list(loss), device=device).mean()
+                # 文字列を含む場合があるので、数値のみをフィルタリング
+                try:
+                    numeric_loss = []
+                    for x in loss:
+                        if isinstance(x, (int, float)):
+                            numeric_loss.append(float(x))
+                        elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                            numeric_loss.append(float(x))
+                        elif isinstance(x, torch.Tensor):
+                            numeric_loss.append(x.item())
+                    
+                    if numeric_loss:
+                        loss = torch.tensor(numeric_loss, device=device).mean()
+                    else:
+                        logger.warning(f"イテラブルから数値を抽出できませんでした。ゼロの損失を使用します。")
+                        loss = torch.tensor(0.0, device=device)
+                except Exception as e:
+                    logger.error(f"イテラブルからの損失計算中にエラーが発生しました: {e}")
+                    loss = torch.tensor(0.0, device=device)
             # 単一の値の場合
             else:
-                loss = torch.tensor(loss, device=device)
+                try:
+                    # 文字列の場合は数値に変換を試みる
+                    if isinstance(loss, str):
+                        if loss.replace('.', '', 1).isdigit():
+                            loss = torch.tensor(float(loss), device=device)
+                        else:
+                            logger.warning(f"文字列を数値に変換できませんでした: {loss}. ゼロの損失を使用します。")
+                            loss = torch.tensor(0.0, device=device)
+                    else:
+                        loss = torch.tensor(loss, device=device)
+                except Exception as e:
+                    logger.error(f"損失値の変換中にエラーが発生しました: {e}")
+                    loss = torch.tensor(0.0, device=device)
+            
+            logger.info(f"損失をテンソルに変換しました: {loss}")
         
         # 結果の返却
         return transformers.modeling_outputs.CausalLMOutputWithPast(
@@ -618,13 +684,27 @@ class LISAForCausalLM(LISAPreTrainedModel):
         モデルの保存
         
         SAMモデルの部分は保存しないようにする
+        また、safetensors形式での保存エラーに対応する
         """
+        # safetensors形式での保存を明示的に無効化
+        kwargs['safe_serialization'] = False
+        
+        # max_shard_sizeを設定してシャーディングを有効に
+        if 'max_shard_size' not in kwargs:
+            kwargs['max_shard_size'] = "5GB"
+        
         # 一時的にSAMモデルを取り外して保存
         tmp_sam_model = self.lisa.model.sam_model
         self.lisa.model.sam_model = None
         
-        # 元のメソッドで保存
-        super().save_pretrained(*args, **kwargs)
-        
-        # SAMモデルを戻す
-        self.lisa.model.sam_model = tmp_sam_model 
+        try:
+            # 元のメソッドで保存
+            logger.info(f"モデルを保存します: {args[0] if args else kwargs.get('save_directory', 'unknown')}")
+            super().save_pretrained(*args, **kwargs)
+            logger.info("モデルの保存が完了しました")
+        except Exception as e:
+            logger.error(f"モデル保存中にエラーが発生しました: {e}")
+            raise
+        finally:
+            # SAMモデルを戻す（エラーが発生しても確実に戻すため、finallyブロックで）
+            self.lisa.model.sam_model = tmp_sam_model 

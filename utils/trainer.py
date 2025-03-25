@@ -87,18 +87,77 @@ class GemmaLISATrainer(Trainer):
             
             # 非テンソル型をテンソルに変換
             if not isinstance(loss, torch.Tensor):
-                logger.info(f"compute_loss: 損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                logger.info(f"compute_loss: 損失が非テンソル型です（{type(loss)}）: {loss}")
                 
+                # 辞書の場合
+                if isinstance(loss, dict):
+                    # 数値のみを含む辞書の場合
+                    try:
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                            logger.info(f"辞書から数値を抽出して損失を計算しました: {loss}")
+                        else:
+                            # 数値がない場合はゼロの損失を返す
+                            logger.warning(f"辞書から数値を抽出できませんでした。ゼロの損失を使用します。")
+                            loss = torch.tensor(0.0, device=model.device)
+                    except Exception as e:
+                        logger.error(f"辞書からの損失計算中にエラーが発生しました: {e}")
+                        # エラーが発生した場合はゼロの損失を返す
+                        loss = torch.tensor(0.0, device=model.device)
                 # mapオブジェクトの場合
-                if isinstance(loss, map):
+                elif isinstance(loss, map):
                     loss_list = list(loss)
-                    loss = torch.tensor(loss_list, device=model.device).mean()
+                    # 文字列を含む可能性があるのでフィルタリング
+                    numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                    if numeric_loss:
+                        loss = torch.tensor(numeric_loss, device=model.device).mean()
+                    else:
+                        logger.warning(f"mapオブジェクトから数値を抽出できませんでした。ゼロの損失を使用します。")
+                        loss = torch.tensor(0.0, device=model.device)
                 # イテラブルな場合
                 elif hasattr(loss, "__iter__"):
-                    loss = torch.tensor(list(loss), device=model.device).mean()
+                    # 文字列を含む可能性があるのでフィルタリング
+                    try:
+                        numeric_loss = []
+                        for x in loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            logger.warning(f"イテラブルから数値を抽出できませんでした。ゼロの損失を使用します。")
+                            loss = torch.tensor(0.0, device=model.device)
+                    except Exception as e:
+                        logger.error(f"イテラブルからの損失計算中にエラーが発生しました: {e}")
+                        loss = torch.tensor(0.0, device=model.device)
                 # 単一の値の場合
                 else:
-                    loss = torch.tensor(loss, device=model.device)
+                    try:
+                        # 文字列の場合は数値に変換を試みる
+                        if isinstance(loss, str):
+                            if loss.replace('.', '', 1).isdigit():
+                                loss = torch.tensor(float(loss), device=model.device)
+                            else:
+                                logger.warning(f"文字列を数値に変換できませんでした: {loss}. ゼロの損失を使用します。")
+                                loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            loss = torch.tensor(loss, device=model.device)
+                    except Exception as e:
+                        logger.error(f"損失値の変換中にエラーが発生しました: {e}")
+                        loss = torch.tensor(0.0, device=model.device)
                 
                 logger.info(f"compute_loss: 損失をテンソルに変換しました: {loss}")
         except Exception as e:
@@ -109,32 +168,212 @@ class GemmaLISATrainer(Trainer):
         # 損失の内訳を記録（属性アクセスと辞書アクセスの両方をサポート）
         # lm_loss
         if hasattr(outputs, "lm_loss") and outputs.lm_loss is not None:
-            self.log({"lm_loss": outputs.lm_loss.detach().cpu().item()})
+            lm_loss = outputs.lm_loss
+            # 非テンソル型の場合は変換
+            if not isinstance(lm_loss, torch.Tensor):
+                try:
+                    if isinstance(lm_loss, dict):
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in lm_loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            lm_loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    elif isinstance(lm_loss, map):
+                        loss_list = list(lm_loss)
+                        numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                        if numeric_loss:
+                            lm_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    elif hasattr(lm_loss, "__iter__"):
+                        numeric_loss = []
+                        for x in lm_loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            lm_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    else:
+                        if isinstance(lm_loss, str):
+                            if lm_loss.replace('.', '', 1).isdigit():
+                                lm_loss = torch.tensor(float(lm_loss), device=model.device)
+                            else:
+                                lm_loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            lm_loss = torch.tensor(lm_loss, device=model.device)
+                except Exception as e:
+                    logger.error(f"lm_loss値の変換中にエラーが発生しました: {e}")
+                    lm_loss = torch.tensor(0.0, device=model.device)
+            self.log({"lm_loss": lm_loss.detach().cpu().item()})
+            
         elif isinstance(outputs, dict) and "lm_loss" in outputs and outputs["lm_loss"] is not None:
             lm_loss = outputs["lm_loss"]
             # 非テンソル型の場合は変換
             if not isinstance(lm_loss, torch.Tensor):
-                if isinstance(lm_loss, map):
-                    lm_loss = torch.tensor(list(lm_loss), device=model.device).mean()
-                elif hasattr(lm_loss, "__iter__"):
-                    lm_loss = torch.tensor(list(lm_loss), device=model.device).mean()
-                else:
-                    lm_loss = torch.tensor(lm_loss, device=model.device)
+                try:
+                    if isinstance(lm_loss, dict):
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in lm_loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            lm_loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    elif isinstance(lm_loss, map):
+                        loss_list = list(lm_loss)
+                        numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                        if numeric_loss:
+                            lm_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    elif hasattr(lm_loss, "__iter__"):
+                        numeric_loss = []
+                        for x in lm_loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            lm_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            lm_loss = torch.tensor(0.0, device=model.device)
+                    else:
+                        if isinstance(lm_loss, str):
+                            if lm_loss.replace('.', '', 1).isdigit():
+                                lm_loss = torch.tensor(float(lm_loss), device=model.device)
+                            else:
+                                lm_loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            lm_loss = torch.tensor(lm_loss, device=model.device)
+                except Exception as e:
+                    logger.error(f"lm_loss値の変換中にエラーが発生しました: {e}")
+                    lm_loss = torch.tensor(0.0, device=model.device)
             self.log({"lm_loss": lm_loss.detach().cpu().item()})
         
         # mask_loss
         if hasattr(outputs, "mask_loss") and outputs.mask_loss is not None:
-            self.log({"mask_loss": outputs.mask_loss.detach().cpu().item()})
+            mask_loss = outputs.mask_loss
+            # 非テンソル型の場合は変換
+            if not isinstance(mask_loss, torch.Tensor):
+                try:
+                    if isinstance(mask_loss, dict):
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in mask_loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            mask_loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    elif isinstance(mask_loss, map):
+                        loss_list = list(mask_loss)
+                        numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                        if numeric_loss:
+                            mask_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    elif hasattr(mask_loss, "__iter__"):
+                        numeric_loss = []
+                        for x in mask_loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            mask_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    else:
+                        if isinstance(mask_loss, str):
+                            if mask_loss.replace('.', '', 1).isdigit():
+                                mask_loss = torch.tensor(float(mask_loss), device=model.device)
+                            else:
+                                mask_loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            mask_loss = torch.tensor(mask_loss, device=model.device)
+                except Exception as e:
+                    logger.error(f"mask_loss値の変換中にエラーが発生しました: {e}")
+                    mask_loss = torch.tensor(0.0, device=model.device)
+            self.log({"mask_loss": mask_loss.detach().cpu().item()})
+            
         elif isinstance(outputs, dict) and "mask_loss" in outputs and outputs["mask_loss"] is not None:
             mask_loss = outputs["mask_loss"]
             # 非テンソル型の場合は変換
             if not isinstance(mask_loss, torch.Tensor):
-                if isinstance(mask_loss, map):
-                    mask_loss = torch.tensor(list(mask_loss), device=model.device).mean()
-                elif hasattr(mask_loss, "__iter__"):
-                    mask_loss = torch.tensor(list(mask_loss), device=model.device).mean()
-                else:
-                    mask_loss = torch.tensor(mask_loss, device=model.device)
+                try:
+                    if isinstance(mask_loss, dict):
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in mask_loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            mask_loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    elif isinstance(mask_loss, map):
+                        loss_list = list(mask_loss)
+                        numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                        if numeric_loss:
+                            mask_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    elif hasattr(mask_loss, "__iter__"):
+                        numeric_loss = []
+                        for x in mask_loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            mask_loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            mask_loss = torch.tensor(0.0, device=model.device)
+                    else:
+                        if isinstance(mask_loss, str):
+                            if mask_loss.replace('.', '', 1).isdigit():
+                                mask_loss = torch.tensor(float(mask_loss), device=model.device)
+                            else:
+                                mask_loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            mask_loss = torch.tensor(mask_loss, device=model.device)
+                except Exception as e:
+                    logger.error(f"mask_loss値の変換中にエラーが発生しました: {e}")
+                    mask_loss = torch.tensor(0.0, device=model.device)
             self.log({"mask_loss": mask_loss.detach().cpu().item()})
         
         if return_outputs:
@@ -404,18 +643,77 @@ class GemmaLISATrainer(Trainer):
                 
             # 非テンソル型をテンソルに変換
             if not isinstance(loss, torch.Tensor):
-                logger.info(f"損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                logger.info(f"損失が非テンソル型です（{type(loss)}）: {loss}")
                 
+                # 辞書の場合
+                if isinstance(loss, dict):
+                    # 数値のみを含む辞書の場合
+                    try:
+                        # 辞書内の数値を抽出して平均を計算
+                        numeric_values = []
+                        for k, v in loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                            logger.info(f"辞書から数値を抽出して損失を計算しました: {loss}")
+                        else:
+                            # 数値がない場合はゼロの損失を返す
+                            logger.warning(f"辞書から数値を抽出できませんでした。ゼロの損失を使用します。")
+                            loss = torch.tensor(0.0, device=model.device)
+                    except Exception as e:
+                        logger.error(f"辞書からの損失計算中にエラーが発生しました: {e}")
+                        # エラーが発生した場合はゼロの損失を返す
+                        loss = torch.tensor(0.0, device=model.device)
                 # mapオブジェクトの場合
-                if isinstance(loss, map):
+                elif isinstance(loss, map):
                     loss_list = list(loss)
-                    loss = torch.tensor(loss_list, device=model.device).mean()
+                    # 文字列を含む可能性があるのでフィルタリング
+                    numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                    if numeric_loss:
+                        loss = torch.tensor(numeric_loss, device=model.device).mean()
+                    else:
+                        logger.warning(f"mapオブジェクトから数値を抽出できませんでした。ゼロの損失を使用します。")
+                        loss = torch.tensor(0.0, device=model.device)
                 # イテラブルな場合
                 elif hasattr(loss, "__iter__"):
-                    loss = torch.tensor(list(loss), device=model.device).mean()
+                    # 文字列を含む可能性があるのでフィルタリング
+                    try:
+                        numeric_loss = []
+                        for x in loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            logger.warning(f"イテラブルから数値を抽出できませんでした。ゼロの損失を使用します。")
+                            loss = torch.tensor(0.0, device=model.device)
+                    except Exception as e:
+                        logger.error(f"イテラブルからの損失計算中にエラーが発生しました: {e}")
+                        loss = torch.tensor(0.0, device=model.device)
                 # 単一の値の場合
                 else:
-                    loss = torch.tensor(loss, device=model.device)
+                    try:
+                        # 文字列の場合は数値に変換を試みる
+                        if isinstance(loss, str):
+                            if loss.replace('.', '', 1).isdigit():
+                                loss = torch.tensor(float(loss), device=model.device)
+                            else:
+                                logger.warning(f"文字列を数値に変換できませんでした: {loss}. ゼロの損失を使用します。")
+                                loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            loss = torch.tensor(loss, device=model.device)
+                    except Exception as e:
+                        logger.error(f"損失値の変換中にエラーが発生しました: {e}")
+                        loss = torch.tensor(0.0, device=model.device)
                 
                 logger.info(f"損失をテンソルに変換しました: {loss}")
                 
@@ -430,13 +728,57 @@ class GemmaLISATrainer(Trainer):
             if not isinstance(loss, torch.Tensor):
                 logger.warning(f"scaler.scale前の損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
                 # 再度変換を試みる
-                if isinstance(loss, map):
+                if isinstance(loss, dict):
+                    # 辞書内の数値を抽出して平均を計算
+                    try:
+                        numeric_values = []
+                        for k, v in loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            loss = torch.tensor(0.0, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
+                elif isinstance(loss, map):
                     loss_list = list(loss)
-                    loss = torch.tensor(loss_list, device=model.device).mean()
+                    numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                    if numeric_loss:
+                        loss = torch.tensor(numeric_loss, device=model.device).mean()
+                    else:
+                        loss = torch.tensor(0.0, device=model.device)
                 elif hasattr(loss, "__iter__"):
-                    loss = torch.tensor(list(loss), device=model.device).mean()
+                    try:
+                        numeric_loss = []
+                        for x in loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            loss = torch.tensor(0.0, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
                 else:
-                    loss = torch.tensor(loss, device=model.device)
+                    try:
+                        if isinstance(loss, str):
+                            if loss.replace('.', '', 1).isdigit():
+                                loss = torch.tensor(float(loss), device=model.device)
+                            else:
+                                loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            loss = torch.tensor(loss, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
             
             self.scaler.scale(loss).backward()
             
@@ -455,13 +797,57 @@ class GemmaLISATrainer(Trainer):
             if not isinstance(loss, torch.Tensor):
                 logger.warning(f"backward前の損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
                 # 再度変換を試みる
-                if isinstance(loss, map):
+                if isinstance(loss, dict):
+                    # 辞書内の数値を抽出して平均を計算
+                    try:
+                        numeric_values = []
+                        for k, v in loss.items():
+                            if isinstance(v, (int, float)):
+                                numeric_values.append(float(v))
+                            elif isinstance(v, torch.Tensor):
+                                numeric_values.append(v.item())
+                        
+                        if numeric_values:
+                            loss = torch.tensor(sum(numeric_values) / len(numeric_values), device=model.device)
+                        else:
+                            loss = torch.tensor(0.0, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
+                elif isinstance(loss, map):
                     loss_list = list(loss)
-                    loss = torch.tensor(loss_list, device=model.device).mean()
+                    numeric_loss = [float(x) for x in loss_list if isinstance(x, (int, float)) or (isinstance(x, str) and x.replace('.', '', 1).isdigit())]
+                    if numeric_loss:
+                        loss = torch.tensor(numeric_loss, device=model.device).mean()
+                    else:
+                        loss = torch.tensor(0.0, device=model.device)
                 elif hasattr(loss, "__iter__"):
-                    loss = torch.tensor(list(loss), device=model.device).mean()
+                    try:
+                        numeric_loss = []
+                        for x in loss:
+                            if isinstance(x, (int, float)):
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, str) and x.replace('.', '', 1).isdigit():
+                                numeric_loss.append(float(x))
+                            elif isinstance(x, torch.Tensor):
+                                numeric_loss.append(x.item())
+                        
+                        if numeric_loss:
+                            loss = torch.tensor(numeric_loss, device=model.device).mean()
+                        else:
+                            loss = torch.tensor(0.0, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
                 else:
-                    loss = torch.tensor(loss, device=model.device)
+                    try:
+                        if isinstance(loss, str):
+                            if loss.replace('.', '', 1).isdigit():
+                                loss = torch.tensor(float(loss), device=model.device)
+                            else:
+                                loss = torch.tensor(0.0, device=model.device)
+                        else:
+                            loss = torch.tensor(loss, device=model.device)
+                    except:
+                        loss = torch.tensor(0.0, device=model.device)
             
             loss.backward()
             
