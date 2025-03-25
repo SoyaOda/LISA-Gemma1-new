@@ -201,13 +201,6 @@ class LISAPreTrainedModel(PreTrainedModel, GenerationMixin):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
     
-    def _set_gradient_checkpointing(self, module, value=False):
-        """
-        グラディエントチェックポイントの設定を行います。
-        """
-        if isinstance(module, GemmaLISAMetaModel):
-            module.gradient_checkpointing = value 
-    
     def get_input_embeddings(self):
         """
         入力埋め込み層を取得します。

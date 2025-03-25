@@ -31,11 +31,15 @@ class GemmaLISATrainer(Trainer):
         self.bce_loss_weight = kwargs.pop("bce_loss_weight", 2.0)
         self.dice_loss_weight = kwargs.pop("dice_loss_weight", 0.5)
         
+        # processing_classを使用するように変更（tokenizer非推奨の対応）
+        if "tokenizer" in kwargs and "processing_class" not in kwargs:
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
+        
         # 親クラスの初期化
         super().__init__(**kwargs)
         
         # 混合精度トレーニング用のスケーラーを初期化
-        self.scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() and (self.args.fp16 or self.args.bf16) else None
+        self.scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() and (self.args.fp16 or self.args.bf16) else None
         
         # GPUデバイス情報のログ
         if torch.cuda.is_available():
@@ -64,15 +68,74 @@ class GemmaLISATrainer(Trainer):
         # モデルの出力を取得
         outputs = model(**inputs)
         
-        # 総合損失
-        loss = outputs["loss"]
+        # 損失へのアクセス - 辞書と属性の両方に対応
+        try:
+            # 1. 属性としてアクセスを試みる（Gemma3などのモデルで期待される方法）
+            if hasattr(outputs, "loss"):
+                loss = outputs.loss
+            # 2. 辞書としてアクセスを試みる
+            elif isinstance(outputs, dict) and "loss" in outputs:
+                loss = outputs["loss"]
+            else:
+                # どちらの方法でもlossが見つからない場合、例外を発生
+                logger.error(f"損失が見つかりません。outputs型: {type(outputs)}")
+                if isinstance(outputs, dict):
+                    logger.error(f"出力キー: {list(outputs.keys())}")
+                else:
+                    logger.error(f"利用可能な属性: {dir(outputs)}")
+                raise ValueError("モデル出力から損失を取得できません。モデルの出力形式を確認してください。")
+            
+            # 非テンソル型をテンソルに変換
+            if not isinstance(loss, torch.Tensor):
+                logger.info(f"compute_loss: 損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                
+                # mapオブジェクトの場合
+                if isinstance(loss, map):
+                    loss_list = list(loss)
+                    loss = torch.tensor(loss_list, device=model.device).mean()
+                # イテラブルな場合
+                elif hasattr(loss, "__iter__"):
+                    loss = torch.tensor(list(loss), device=model.device).mean()
+                # 単一の値の場合
+                else:
+                    loss = torch.tensor(loss, device=model.device)
+                
+                logger.info(f"compute_loss: 損失をテンソルに変換しました: {loss}")
+        except Exception as e:
+            logger.error(f"compute_loss: 損失へのアクセス中にエラーが発生しました: {e}")
+            logger.error(f"outputs型: {type(outputs)}")
+            raise e
         
-        # 損失の内訳を記録
-        if hasattr(outputs, "lm_loss") and outputs["lm_loss"] is not None:
-            self.log({"lm_loss": outputs["lm_loss"].detach().cpu().item()})
+        # 損失の内訳を記録（属性アクセスと辞書アクセスの両方をサポート）
+        # lm_loss
+        if hasattr(outputs, "lm_loss") and outputs.lm_loss is not None:
+            self.log({"lm_loss": outputs.lm_loss.detach().cpu().item()})
+        elif isinstance(outputs, dict) and "lm_loss" in outputs and outputs["lm_loss"] is not None:
+            lm_loss = outputs["lm_loss"]
+            # 非テンソル型の場合は変換
+            if not isinstance(lm_loss, torch.Tensor):
+                if isinstance(lm_loss, map):
+                    lm_loss = torch.tensor(list(lm_loss), device=model.device).mean()
+                elif hasattr(lm_loss, "__iter__"):
+                    lm_loss = torch.tensor(list(lm_loss), device=model.device).mean()
+                else:
+                    lm_loss = torch.tensor(lm_loss, device=model.device)
+            self.log({"lm_loss": lm_loss.detach().cpu().item()})
         
-        if hasattr(outputs, "mask_loss") and outputs["mask_loss"] is not None:
-            self.log({"mask_loss": outputs["mask_loss"].detach().cpu().item()})
+        # mask_loss
+        if hasattr(outputs, "mask_loss") and outputs.mask_loss is not None:
+            self.log({"mask_loss": outputs.mask_loss.detach().cpu().item()})
+        elif isinstance(outputs, dict) and "mask_loss" in outputs and outputs["mask_loss"] is not None:
+            mask_loss = outputs["mask_loss"]
+            # 非テンソル型の場合は変換
+            if not isinstance(mask_loss, torch.Tensor):
+                if isinstance(mask_loss, map):
+                    mask_loss = torch.tensor(list(mask_loss), device=model.device).mean()
+                elif hasattr(mask_loss, "__iter__"):
+                    mask_loss = torch.tensor(list(mask_loss), device=model.device).mean()
+                else:
+                    mask_loss = torch.tensor(mask_loss, device=model.device)
+            self.log({"mask_loss": mask_loss.detach().cpu().item()})
         
         if return_outputs:
             return loss, outputs
@@ -321,9 +384,8 @@ class GemmaLISATrainer(Trainer):
         # 順伝播
         outputs = model(**inputs)
         
-        # 修正: 損失へのアクセス方法を変更
+        # 損失へのアクセス
         # Gemma3モデルはCausalLMOutputWithPastオブジェクトを返し、.lossで属性としてアクセスする必要がある
-        # 両方の形式（属性と辞書）に対応
         try:
             # 1. 属性としてアクセスを試みる（Gemma3などのモデルで期待される方法）
             if hasattr(outputs, "loss"):
@@ -340,17 +402,21 @@ class GemmaLISATrainer(Trainer):
                     logger.error(f"利用可能な属性: {dir(outputs)}")
                 raise ValueError("モデル出力から損失を取得できません。モデルの出力形式を確認してください。")
                 
-            # ここでmapオブジェクトをテンソルに変換する処理を追加
-            # Pythonのmapオブジェクトの場合、リストに変換してからテンソルに変換
-            if isinstance(loss, map):
-                logger.info("損失がmapオブジェクトとして返されました。テンソルに変換します。")
-                loss_list = list(loss)
-                # 損失のリストが1つの値しか持たない場合を想定
-                if len(loss_list) == 1:
-                    loss = torch.tensor(loss_list[0], device=model.device)
-                else:
-                    # 複数の値がある場合は平均を取る
+            # 非テンソル型をテンソルに変換
+            if not isinstance(loss, torch.Tensor):
+                logger.info(f"損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                
+                # mapオブジェクトの場合
+                if isinstance(loss, map):
+                    loss_list = list(loss)
                     loss = torch.tensor(loss_list, device=model.device).mean()
+                # イテラブルな場合
+                elif hasattr(loss, "__iter__"):
+                    loss = torch.tensor(list(loss), device=model.device).mean()
+                # 単一の値の場合
+                else:
+                    loss = torch.tensor(loss, device=model.device)
+                
                 logger.info(f"損失をテンソルに変換しました: {loss}")
                 
         except Exception as e:
@@ -360,6 +426,18 @@ class GemmaLISATrainer(Trainer):
         
         # 損失のスケーリング（混合精度学習時）
         if (self.args.fp16 or self.args.bf16) and self.scaler is not None:
+            # テンソルチェック（念のため）
+            if not isinstance(loss, torch.Tensor):
+                logger.warning(f"scaler.scale前の損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                # 再度変換を試みる
+                if isinstance(loss, map):
+                    loss_list = list(loss)
+                    loss = torch.tensor(loss_list, device=model.device).mean()
+                elif hasattr(loss, "__iter__"):
+                    loss = torch.tensor(list(loss), device=model.device).mean()
+                else:
+                    loss = torch.tensor(loss, device=model.device)
+            
             self.scaler.scale(loss).backward()
             
             # 勾配クリッピング（CUDAが利用可能な場合のみ）
@@ -373,14 +451,16 @@ class GemmaLISATrainer(Trainer):
             self.scaler.update()
         else:
             # 通常の学習
-            # mapオブジェクトやその他の非テンソル型をチェック
+            # テンソルチェック（念のため）
             if not isinstance(loss, torch.Tensor):
-                logger.warning(f"損失が期待されるテンソル型ではありません: {type(loss)}。テンソルに変換します。")
-                if hasattr(loss, "__iter__"):
-                    # iterableの場合、listに変換してからテンソルに変換
+                logger.warning(f"backward前の損失が非テンソル型です（{type(loss)}）。テンソルに変換します。")
+                # 再度変換を試みる
+                if isinstance(loss, map):
+                    loss_list = list(loss)
+                    loss = torch.tensor(loss_list, device=model.device).mean()
+                elif hasattr(loss, "__iter__"):
                     loss = torch.tensor(list(loss), device=model.device).mean()
                 else:
-                    # 単一の値の場合
                     loss = torch.tensor(loss, device=model.device)
             
             loss.backward()

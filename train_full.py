@@ -199,7 +199,7 @@ def initialize_model_and_tokenizer(args):
     tokenizer = AutoTokenizer.from_pretrained(
         args.version,
         cache_dir=None,
-        model_max_length=args.model_max_length,
+        model_max_length=1024,
         padding_side="right",
         use_fast=False,
         trust_remote_code=True,
@@ -878,7 +878,7 @@ def main(args):
             save_steps=args.steps_per_epoch // 2,
             save_total_limit=3,
             # 一時的に評価を無効化
-            evaluation_strategy="no",  # "steps" if val_dataset is not None else "no",
+            eval_strategy="no",  # "steps" if val_dataset is not None else "no",
             eval_steps=None,  # args.steps_per_epoch // 2 if val_dataset is not None else None,
             fp16=args.precision == "fp16",
             bf16=args.precision == "bf16",
@@ -897,7 +897,7 @@ def main(args):
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             data_collator=partial(collate_fn, tokenizer=tokenizer),
-            tokenizer=tokenizer,
+            processing_class=tokenizer,  # tokenizer の代わりに processing_class を使用
             # カスタム損失の重み
             ce_loss_weight=args.ce_loss_weight,
             bce_loss_weight=args.bce_loss_weight,

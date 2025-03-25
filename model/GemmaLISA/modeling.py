@@ -159,8 +159,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
                     config.mm_gemma_path,
                     torch_dtype=torch.bfloat16,
                     low_cpu_mem_usage=True,
-                    trust_remote_code=True
+                    trust_remote_code=True,
+                    attn_implementation='eager'
                 )
+                
+                # シーケンス長を拡張（コンフィグを更新）
+                if hasattr(self.language_model.config, "max_sequence_length"):
+                    self.language_model.config.max_sequence_length = 1024
+                    logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
             else:
                 # 設定のみから初期化（通常は推奨されない）
                 gemma_config = config.gemma_config
@@ -175,8 +181,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
                 config.mm_gemma_path,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
-                trust_remote_code=True
+                trust_remote_code=True,
+                attn_implementation='eager'
             )
+            
+            # シーケンス長を拡張（コンフィグを更新）
+            if hasattr(self.language_model.config, "max_sequence_length"):
+                self.language_model.config.max_sequence_length = 1024
+                logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
         else:
             raise ValueError("GemmaモデルのconfigまたはパスをLISA configに指定する必要があります")
         
@@ -219,8 +231,14 @@ class LISAForCausalLM(LISAPreTrainedModel):
             pretrained_model_name_or_path,
             torch_dtype=kwargs.get("torch_dtype", torch.bfloat16),
             low_cpu_mem_usage=True,
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation='eager'
         )
+        
+        # シーケンス長を拡張（コンフィグを更新）
+        if hasattr(gemma_model.config, "max_sequence_length"):
+            gemma_model.config.max_sequence_length = 1024
+            logger.info(f"Gemma3のmax_sequence_lengthを1024に設定しました")
         
         # 新しいインスタンスを作成
         config = GemmaLISAConfig()
@@ -538,6 +556,21 @@ class LISAForCausalLM(LISAPreTrainedModel):
                 loss = loss + 20.0 * mask_loss
             else:
                 loss = 20.0 * mask_loss
+        
+        # 損失がmapオブジェクトまたは非テンソル型である場合、テンソルに変換
+        if loss is not None and not isinstance(loss, torch.Tensor):
+            device = next(self.parameters()).device
+            
+            # mapオブジェクトの場合
+            if isinstance(loss, map):
+                loss_list = list(loss)
+                loss = torch.tensor(loss_list, device=device).mean()
+            # イテラブルな場合
+            elif hasattr(loss, "__iter__"):
+                loss = torch.tensor(list(loss), device=device).mean()
+            # 単一の値の場合
+            else:
+                loss = torch.tensor(loss, device=device)
         
         # 結果の返却
         return transformers.modeling_outputs.CausalLMOutputWithPast(
